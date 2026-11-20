@@ -7,6 +7,7 @@ from rag_engine import (
 # ---------------- Page config ----------------
 DEPT_NAME = "Department of Computer Science and Engineering"  # change to your department
 COLLEGE_NAME = "SHRIDEVI INSTITUTE OF ENGINEERING AND TECHNOLOGY"
+DOCS_FOLDER = "dept_docs"
 
 st.set_page_config(page_title="SIET Department Chatbot", page_icon="🎓", layout="centered")
 
@@ -16,51 +17,29 @@ mykey = st.secrets["GROQ_API_KEYS"]
 # ---------------- Cached resources ----------------
 @st.cache_resource
 def get_embed_model():
-    return load_embed_model("dept_docs")
+    return load_embed_model()
+
+
+@st.cache_resource
+def get_knowledge_base():
+    """Read all PDFs from the college_docs folder, chunk, embed and index them once."""
+    sources = folder_sources(DOCS_FOLDER)
+    if not sources:
+        return None, [], [], []
+    chunks, errors = build_chunks(sources)
+    if not chunks:
+        return None, [], [], errors
+    index = build_index(chunks, get_embed_model())
+    return index, chunks, sorted({c["source"] for c in chunks}), errors
 
 
 embed_model = get_embed_model()
+with st.spinner("Loading department documents..."):
+    index, chunks, doc_names, load_errors = get_knowledge_base()
 
 # ---------------- Session state ----------------
-defaults = {
-    "chat_hist": [],
-    "chunks": [],
-    "index": None,
-    "doc_names": [],
-    "auto_loaded": False,
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-
-def rebuild_knowledge_base(uploaded_files):
-    """Combine PDFs from 'college_docs' folder + uploaded PDFs and build FAISS index."""
-    sources = folder_sources("college_docs")
-    for f in uploaded_files or []:
-        sources.append((f.name, f))
-
-    if not sources:
-        st.sidebar.warning("No PDFs found. Upload at least one PDF.")
-        return
-
-    with st.spinner("Reading PDFs, chunking and embedding..."):
-        chunks, errors = build_chunks(sources)
-        for e in errors:
-            st.sidebar.error(e)
-        if not chunks:
-            st.sidebar.error("No readable text found in the PDFs.")
-            return
-        st.session_state.index = build_index(chunks, embed_model)
-        st.session_state.chunks = chunks
-        st.session_state.doc_names = sorted({c["source"] for c in chunks})
-
-
-# Auto-load default PDFs from folder once
-if not st.session_state.auto_loaded:
-    st.session_state.auto_loaded = True
-    if folder_sources("college_docs"):
-        rebuild_knowledge_base([])
+if "chat_hist" not in st.session_state:
+    st.session_state.chat_hist = []
 
 # ---------------- Sidebar ----------------
 with st.sidebar:
@@ -70,7 +49,7 @@ with st.sidebar:
     st.write(
         f"A question-answering chatbot for the **{DEPT_NAME}**. "
         "Ask about courses, syllabus, faculty, FAQs, rules & regulations, "
-        "placements and more. Answers come only from the uploaded documents."
+        "placements and more. Answers come only from the department documents."
     )
 
     st.subheader("RAG Pipeline")
@@ -86,23 +65,16 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("📄 Upload Documents")
-    uploaded = st.file_uploader(
-        "Upload department PDFs", type=["pdf"], accept_multiple_files=True
-    )
-    if st.button("Process documents", use_container_width=True):
-        rebuild_knowledge_base(uploaded)
-
-    if st.session_state.doc_names:
-        st.success(
-            f"{len(st.session_state.doc_names)} file(s), "
-            f"{len(st.session_state.chunks)} chunks indexed"
-        )
+    st.subheader("📄 Knowledge Base")
+    if doc_names:
+        st.success(f"{len(doc_names)} file(s), {len(chunks)} chunks indexed")
         with st.expander("Indexed files"):
-            for n in st.session_state.doc_names:
+            for n in doc_names:
                 st.write("•", n)
     else:
-        st.info("No documents indexed yet.")
+        st.warning(f"No PDFs found in the '{DOCS_FOLDER}' folder.")
+    for e in load_errors:
+        st.error(e)
 
     st.divider()
     st.subheader("⚙️ Settings")
@@ -121,15 +93,20 @@ st.caption(f"{DEPT_NAME} Chatbot")
 st.caption("Ask anything about Courses, FAQs, Rules and Regulations, Placements...")
 st.caption("RAG Pipeline with multiple files")
 
+
+def show_sources_box(hits):
+    with st.expander("Sources"):
+        for s in hits:
+            st.markdown(f"**{s['source']}** (score {s['score']:.2f})")
+            st.caption(s["text"][:300] + "...")
+
+
 # Show history
 for qa in st.session_state.chat_hist:
     with st.chat_message(qa["role"]):
         st.write(qa["content"])
         if show_sources and qa.get("sources"):
-            with st.expander("Sources"):
-                for s in qa["sources"]:
-                    st.markdown(f"**{s['source']}** (score {s['score']:.2f})")
-                    st.caption(s["text"][:300] + "...")
+            show_sources_box(qa["sources"])
 
 question = st.chat_input("Ask anything about the department...")
 
@@ -139,29 +116,21 @@ if question:
         st.write(question)
 
     with st.chat_message("assistant"):
-        if st.session_state.index is None:
-            answer = "Please upload PDFs in the sidebar and click **Process documents** first."
-            hits = []
+        if index is None:
+            answer, hits = f"No documents are loaded. Add PDFs to the '{DOCS_FOLDER}' folder and restart the app.", []
             st.write(answer)
         else:
             with st.spinner("Generating answer..."):
                 try:
                     answer, hits = ask_rag(
-                        question,
-                        embed_model,
-                        st.session_state.chunks,
-                        st.session_state.index,
-                        api_key=mykey,
-                        num_chunks=num_chunks,
+                        question, embed_model, chunks, index,
+                        api_key=mykey, num_chunks=num_chunks,
                     )
                 except Exception as e:
                     answer, hits = f"Error: {e}", []
             st.write(answer)
             if show_sources and hits:
-                with st.expander("Sources"):
-                    for s in hits:
-                        st.markdown(f"**{s['source']}** (score {s['score']:.2f})")
-                        st.caption(s["text"][:300] + "...")
+                show_sources_box(hits)
 
     st.session_state.chat_hist.append(
         {"role": "assistant", "content": answer, "sources": hits}
