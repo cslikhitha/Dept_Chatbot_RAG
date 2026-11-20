@@ -16,7 +16,7 @@ mykey = st.secrets["GROQ_API_KEYS"]
 # ---------------- Cached resources ----------------
 @st.cache_resource
 def get_embed_model():
-    return load_embed_model()
+    return load_embed_model("dept_docs")
 
 
 embed_model = get_embed_model()
