@@ -85,7 +85,7 @@ with st.sidebar:
         st.session_state.chat_hist = []
         st.rerun()
 
-    st.caption("Created by LIKHITHA SK")
+    st.caption("Created by GROUP_8")
 
 # ---------------- Main window ----------------
 st.title(COLLEGE_NAME)
